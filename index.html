@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>빠스의 염전 탈출기</title>
+  <style>
+    body {
+      margin: 0;
+      background: #333;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+    canvas {
+      border: 2px solid #fff;
+      background: #111;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas"></canvas>
+  <script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = 800;
+    canvas.height = 600;
+
+    // 플레이어 설정
+    const playerWidth = 30, playerHeight = 30;
+    let playerX = canvas.width / 4;
+    let playerY = canvas.height - playerHeight - 30;
+    const basePlayerSpeed = 5;
+    let playerSpeed = basePlayerSpeed;
+    const jumpPower = -12, gravity = 0.6;
+    let velocityY = 0;
+    let isJumping = false;
+
+    // 바닥 또는 천장에 머무른 시간(프레임 단위, 60fps 기준 5초 = 300프레임)
+    let boundaryCounter = 0;
+    const boundaryTimeThreshold = 300; // 5초
+
+    // 플레이어가 천장이나 바닥에 붙으면 속도 감소 (최소 속도 미만이면 게임 오버)
+    const speedDecayRate = 0.005;
+    const minSpeedThreshold = 2;
+
+    // 좌우 이동: -1: 왼쪽, 1: 오른쪽
+    let moveDirection = 0;
+
+    // 점수
+    let score = 0;
+
+    // 게임 진행 속도 (장애물 이동 속도)
+    const baseGameSpeed = 2;
+    let gameSpeed = baseGameSpeed;
+
+    // 추적자 설정 – 항상 플레이어의 뒤쪽(플레이어의 왼쪽)에 위치
+    let chaserOffset = 150; // 기본 오프셋 (플레이어 기준 왼쪽 150px)
+    let chaser = {
+      x: playerX - chaserOffset,
+      y: playerY,
+      width: playerWidth,
+      height: playerHeight,
+      speed: 3
+    };
+    const chaserFollowSpeed = 0.1; // 선형 보간 계수
+
+    // 장애물 설정: 바닥 장애물 ("염전")
+    let bottomObstacles = [];
+    const obstacleWidth = 60;
+    const bottomObstacleHeightMin = 40, bottomObstacleHeightMax = 200;
+    // 천장 장애물 ("한통속 마을주민")
+    let topObstacles = [];
+    const topObstacleWidth = 60;
+    const topObstacleHeightMin = 40, topObstacleHeightMax = 200;
+
+    // 스피드업 아이템 설정
+    let speedUpItems = [];
+    const speedUpItemSize = 20;
+    let speedBoostActive = false;
+    let speedBoostTimer = 0; // 프레임 단위 (300 ≒ 5초)
+
+    // 폰트 설정 (텍스트 표시)
+    const playerFont = "20px Arial";
+    const chaserFont = "20px Arial";
+    const obstacleFont = "18px Arial";
+
+    // 입력 처리: 스페이스바 = 무한 점프, 좌우 이동은 화살표 키
+    document.addEventListener('keydown', (e) => {
+      if (e.code === 'Space') {
+        // 무한 점프: 공중에 있든 땅에 있든 계속 점프 힘을 재설정
+        velocityY = jumpPower;
+        isJumping = true;
+      } else if (e.code === 'ArrowRight' || e.code === 'KeyD') {
+        moveDirection = 1;
+      } else if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
+        moveDirection = -1;
+      }
+    });
+    document.addEventListener('keyup', (e) => {
+      if (
+        e.code === 'ArrowRight' || e.code === 'KeyD' ||
+        e.code === 'ArrowLeft' || e.code === 'KeyA'
+      ) {
+        moveDirection = 0;
+      }
+    });
+
+    // 플레이어 업데이트: 이동, 점프, 경계 처리
+    function updatePlayer() {
+      // 좌우 이동
+      playerX += moveDirection * basePlayerSpeed;
+
+      // 점프 및 중력 적용
+      velocityY += gravity;
+      playerY += velocityY;
+
+      // 바닥 경계
+      if (playerY > canvas.height - playerHeight - 30) {
+        playerY = canvas.height - playerHeight - 30;
+        isJumping = false;
+      }
+      // 천장 경계
+      if (playerY < 0) {
+        playerY = 0;
+      }
+      // 좌우 경계
+      if (playerX < 0) playerX = 0;
+      if (playerX > canvas.width - playerWidth) playerX = canvas.width - playerWidth;
+
+      // 플레이어가 천장이나 바닥에 붙어있으면 속도 감소
+      if (playerY === 0 || playerY === canvas.height - playerHeight - 30) {
+        playerSpeed = Math.max(playerSpeed - speedDecayRate, 0);
+        // 추적자 속도도 약간 증가시키기
+        chaser.speed += 0.005;
+        if (playerSpeed < minSpeedThreshold) {
+          gameOver();
+          return;
+        }
+      }
+
+      // 플레이어 텍스트 그리기 ("vvs9080")
+      ctx.font = playerFont;
+      ctx.fillStyle = '#00f';
+      ctx.fillText("vvs9080", playerX, playerY + playerHeight);
+      // 히트박스 테두리 (흰색)
+      ctx.strokeStyle = '#fff';
+      ctx.strokeRect(playerX, playerY, playerWidth, playerHeight);
+    }
+
+    // 추적자 업데이트: 항상 플레이어의 뒤쪽에 위치 (Lerp 방식) → 텍스트 "염전주인"
+    function updateChaser() {
+      const targetX = playerX - chaserOffset;
+      const targetY = playerY;
+      chaser.x += (targetX - chaser.x) * chaserFollowSpeed;
+      chaser.y += (targetY - chaser.y) * chaserFollowSpeed;
+      ctx.font = chaserFont;
+      ctx.fillStyle = '#f00';
+      ctx.fillText("염전주인", chaser.x, chaser.y + chaser.height);
+      // 히트박스 테두리 (흰색)
+      ctx.strokeStyle = '#fff';
+      ctx.strokeRect(chaser.x, chaser.y, chaser.width, chaser.height);
+    }
+
+    // 장애물 생성: 바닥 장애물 → 텍스트 "염전"
+    function createBottomObstacle() {
+      const h = Math.random() * (bottomObstacleHeightMax - bottomObstacleHeightMin) + bottomObstacleHeightMin;
+      bottomObstacles.push({ x: canvas.width, y: canvas.height - h, width: obstacleWidth, height: h });
+    }
+    // 천장 장애물 생성: 텍스트 "한통속 마을주민"
+    function createTopObstacle() {
+      const h = Math.random() * (topObstacleHeightMax - topObstacleHeightMin) + topObstacleHeightMin;
+      topObstacles.push({ x: canvas.width, y: 0, width: topObstacleWidth, height: h });
+    }
+    // 스피드업 아이템 생성: 노란 사각형
+    function createSpeedUpItem() {
+      const x = canvas.width;
+      const y = Math.random() * (canvas.height - speedUpItemSize);
+      speedUpItems.push({ x, y, size: speedUpItemSize });
+    }
+
+    // 장애물 및 아이템 업데이트
+    function updateObstacles() {
+      // 장애물 생성 (더 촘촘하게)
+      if (Math.random() < 0.04) createBottomObstacle();
+      if (Math.random() < 0.04) createTopObstacle();
+      if (Math.random() < 0.015) createSpeedUpItem();
+
+      // 바닥 장애물 이동 및 그리기 (염전 텍스트)
+      for (let obs of bottomObstacles) {
+        obs.x -= gameSpeed;
+        ctx.font = obstacleFont;
+        ctx.fillStyle = 'green';
+        ctx.fillText("염전", obs.x, obs.y + obs.height / 2);
+        ctx.strokeStyle = '#fff';
+        ctx.strokeRect(obs.x, obs.y, obs.width, obs.height);
+      }
+      bottomObstacles = bottomObstacles.filter(obs => obs.x + obs.width > 0);
+
+      // 천장 장애물 이동 및 그리기 (한통속 마을주민 텍스트)
+      for (let obs of topObstacles) {
+        obs.x -= gameSpeed;
+        ctx.font = obstacleFont;
+        ctx.fillStyle = 'orange';
+        ctx.fillText("한통속 마을주민", obs.x, obs.y + obs.height / 2);
+        ctx.strokeStyle = '#fff';
+        ctx.strokeRect(obs.x, obs.y, obs.width, obs.height);
+      }
+      topObstacles = topObstacles.filter(obs => obs.x + obs.width > 0);
+
+      // 스피드업 아이템 이동 및 그리기
+      for (let item of speedUpItems) {
+        item.x -= gameSpeed;
+        ctx.fillStyle = 'yellow';
+        ctx.fillRect(item.x, item.y, item.size, item.size);
+        ctx.strokeStyle = '#fff';
+        ctx.strokeRect(item.x, item.y, item.size, item.size);
+      }
+      speedUpItems = speedUpItems.filter(item => item.x + item.size > 0);
+    }
+
+    // 스피드업 아이템 충돌 체크
+    function checkSpeedUpItemCollision() {
+      for (let i = 0; i < speedUpItems.length; i++) {
+        let item = speedUpItems[i];
+        if (
+          playerX + playerWidth > item.x &&
+          playerX < item.x + item.size &&
+          playerY + playerHeight > item.y &&
+          playerY < item.y + item.size
+        ) {
+          speedBoostActive = true;
+          speedBoostTimer = 300; // 약 5초 (300 프레임)
+          playerSpeed = 10; // 일시적 속도 증가
+          chaserOffset = 300; // 추적자 뒤로 밀려남
+          gameSpeed = baseGameSpeed + 2; // 게임 진행 속도 증가
+          speedUpItems.splice(i, 1);
+          i--;
+        }
+      }
+    }
+
+    // 충돌 체크: 장애물 및 추적자 충돌 시 게임 오버
+    function checkCollisions() {
+      for (let obs of bottomObstacles) {
+        if (
+          playerX + playerWidth > obs.x &&
+          playerX < obs.x + obs.width &&
+          playerY + playerHeight > obs.y &&
+          playerY < obs.y + obs.height
+        ) {
+          return true;
+        }
+      }
+      for (let obs of topObstacles) {
+        if (
+          playerX + playerWidth > obs.x &&
+          playerX < obs.x + obs.width &&
+          playerY < obs.height
+        ) {
+          return true;
+        }
+      }
+      if (
+        playerX + playerWidth > chaser.x &&
+        playerX < chaser.x + chaser.width &&
+        playerY + playerHeight > chaser.y &&
+        playerY < chaser.y + chaser.height
+      ) {
+        return true;
+      }
+      return false;
+    }
+
+    // 게임 오버 처리
+    let isGameOver = false;
+    function gameOver() {
+      isGameOver = true;
+
+      // Discord에서 호스팅하는 이미지 URL 배열 (문제가 있는 이미지는 프록시를 통해 불러옴)
+      const images = [
+        "https://cdn.discordapp.com/attachments/1298234452350341172/1339990834061246465/3.jpeg?ex=67b0bb36&is=67af69b6&hm=3d9050f1ca177c792dc244f44c87ecb40e3cf888e123c2b55ee54a8bfa6b99b9&",
+        "https://cdn.discordapp.com/attachments/1298234452350341172/1339990834371891350/2.gif?ex=67b0bb36&is=67af69b6&hm=7d6e9f4e87fb0c30a7dc8967457a1795c50cbcb3fc6a43629812a2bf98002ea0&",
+        "https://cdn.discordapp.com/attachments/1298234452350341172/1339990834757501030/1.gif?ex=67b0bb36&is=67af69b6&hm=71b2f0b4b098cc9ff9bc75023d70ffd294921d7914491ae0a4c53487355bd74e&"
+      ];
+
+      // 배열에서 랜덤하게 URL 선택 후 프록시 처리하여 CORS 해결
+      const randomImage = images[Math.floor(Math.random() * images.length)];
+      let img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = function() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        ctx.font = "30px Arial";
+        ctx.fillStyle = "white";
+        ctx.fillText("Score: " + Math.floor(score), canvas.width / 2 - 50, canvas.height - 50);
+      };
+      // 프록시를 이용해 CORS 헤더 추가
+      img.src = "https://images.weserv.nl/?url=" + encodeURIComponent(randomImage);
+
+      // 3초 후 초기화 후 재시작
+      setTimeout(() => {
+        isGameOver = false;
+        playerX = canvas.width / 4;
+        playerY = canvas.height - playerHeight - 30;
+        velocityY = 0;
+        playerSpeed = basePlayerSpeed;
+        chaserOffset = 150;
+        chaser.x = playerX - chaserOffset;
+        chaser.y = playerY;
+        bottomObstacles = [];
+        topObstacles = [];
+        speedUpItems = [];
+        gameSpeed = baseGameSpeed;
+        score = 0;
+        boundaryCounter = 0;
+        gameLoop();
+      }, 3000);
+    }
+
+    // 메인 게임 루프
+    function gameLoop() {
+      if (isGameOver) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      updatePlayer();
+      updateChaser();
+      updateObstacles();
+      checkSpeedUpItemCollision();
+
+      // 바닥이나 천장에 있을 경우 타이머 증가, 5초(300프레임) 이상이면 게임 오버
+      if (playerY === 0 || playerY === canvas.height - playerHeight - 30) {
+        boundaryCounter++;
+        if (boundaryCounter >= boundaryTimeThreshold) {
+          gameOver();
+          return;
+        }
+      } else {
+        boundaryCounter = 0;
+      }
+
+      if (checkCollisions()) {
+        gameOver();
+        return;
+      }
+
+      score += 0.05;
+      ctx.font = "20px Arial";
+      ctx.fillStyle = "white";
+      ctx.fillText("Score: " + Math.floor(score), 20, 30);
+
+      if (speedBoostActive) {
+        speedBoostTimer--;
+        if (speedBoostTimer <= 0) {
+          speedBoostActive = false;
+          playerSpeed = basePlayerSpeed;
+          chaserOffset = 150;
+          gameSpeed = baseGameSpeed;
+        }
+      }
+
+      requestAnimationFrame(gameLoop);
+    }
+
+    gameLoop();
+  </script>
+</body>
+</html>
